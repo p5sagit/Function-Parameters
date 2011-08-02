@@ -71,6 +71,13 @@ sub report_pos {
 	print STDERR "$name($offset)>> $line\n";
 }
 
+sub _quote {
+	my ($str) = @_;
+	$str =~ s/([\$\@\\"])/\\$1/g;
+	$str =~ s/\n/\\n/g;
+	qq{"$str"}
+}
+
 sub parser {
 	my ($declarator, $start) = @_;
 	my $offset = $start;
@@ -131,6 +138,12 @@ sub parser {
 		$skipws->();
 	}
 
+	my $peek_str = sub {
+		my ($str) = @_;
+		my $len = length $str;
+		substr($line, $offset, $len) eq $str
+	};
+	
 	my $scan_token = sub {
 		my ($str) = @_;
 		my $len = length $str;
@@ -187,7 +200,14 @@ sub parser {
 		$try->($scan_var)
 	});
 
+	#report_pos $offset, "param";
 	my @param = $scan_params->();
+	my @extra;
+	#report_pos $offset, "extra";
+	while ($peek_str->('(')) {
+		push @extra, [$scan_params->()];
+		#report_pos $offset, "extra";
+	}
 
 	my $scan_pargroup_opt = sub {
 		substr($line, $offset, 1) eq '(' or return '';
@@ -213,39 +233,50 @@ sub parser {
 		' ' . $proto, \@attrs
 	});
 
+	#report_pos $offset, "attr";
 	my ($proto, $attributes) = $scan_attributes->();
 	my $attr = @$attributes ? ' : ' . join(' ', @$attributes) : '';
 
+	#report_pos $offset, "'{'";
 	$scan_token->('{');
 
 	my $manip_end = $offset;
 	my $manip_len = $manip_end - $manip_start;
 	#print STDERR "($manip_start:$manip_len:$manip_end)\n";
 
-	my $params = @param ? 'my (' . join(', ', @param) . ') = @_;' : '';
+	my $params = @param ? 'my (' . join(', ', @param) . ') = @_; ' : '';
+	my $extra_a = join '', map 'sub { ' . (@$_ ? 'my (' . join(', ', @$_) . ') = @_; ' : ''), @extra;
+	my $extra_z = '}' x @extra;
 	#report_pos $offset;
 	$proto =~ tr[\n][ ];
 
+	my $term = sub {
+		my ($str) = @_;
+		$str eq '' and return '';
+		'BEGIN { ' . __PACKAGE__ . '::_terminate_me(' . _quote($str) . '); } '
+	};
+	
 	if (defined $name) {
-		my $pkg = __PACKAGE__;
 		#print STDERR "($manip_start:$manip_len) [$line]\n";
-		substr $line, $manip_start, $manip_len, " do { sub $name$proto; sub $name$proto$attr { BEGIN { ${pkg}::terminate_me(q[$name]); } $params ";
+		substr $line, $manip_start, $manip_len, " do { sub $name$proto; sub $name$proto$attr { $params$extra_a${\$term->(qq[$extra_z \\&$name };])}";
 	} else {
-		substr $line, $manip_start, $manip_len, " sub$proto$attr { $params ";
+		substr $line, $manip_start, $manip_len, " sub$proto$attr { $params$extra_a${\$term->(qq[$extra_z])}";
 	}
-	#print STDERR ".> $line\n";
+	print STDERR ".> $line\n";
 	Devel::Declare::set_linestr($line);
+	print STDERR ".< $line\n";
 }
 
-sub terminate_me {
-	my ($name) = @_;
+sub _terminate_me {
+	print STDERR "..>\n";
+	my ($str) = @_;
 	on_scope_end {
 		my $line = Devel::Declare::get_linestr();
-		#print STDERR "~~> $line\n";
+		print STDERR "~~> $line\n";
 		my $offset = Devel::Declare::get_linestr_offset();
-		substr $line, $offset, 0, " \\&$name };";
+		substr $line, $offset, 0, $str;
 		Devel::Declare::set_linestr($line);
-		#print STDERR "??> $line\n";
+		print STDERR "??> $line\n";
 	};
 }
 
@@ -261,9 +292,15 @@ Function::Parameters - subroutine definitions with parameter lists
 
  use Function::Parameters;
  
- fun foo($bar, $baz) {
-   return $bar + $baz;
+ fun foo($x, $y) {
+   return $x + $y;
  }
+ foo(2, 3);  # 5
+ 
+ fun bar($x)($y) {
+ 	return $x + $y;
+ }
+ bar(2)(3);  # 5
  
  fun mymap($fun, @args) :(&@) {
    my @res;
@@ -299,6 +336,17 @@ list consists of comma-separated variables.
 The effect of C<fun foo($bar, $baz) {> is as if you'd written
 C<sub foo { my ($bar, $baz) = @_; >, i.e. the parameter list is simply
 copied into C<my> and initialized from L<@_|perlvar/"@_">.
+
+=head2 Autocurrying
+
+You can actually use multiple parameter lists:
+C<fun foo(LIST1)(LIST2)(LIST3)...> is valid (and the parameter lists
+are completely separate). You use the same syntax to call the function:
+C<foo(1)(2, 3)(4, 5, 6)>.
+
+What this actually does is to generate nested subs, each returning a reference
+to the next, as if you'd written
+C<fun foo(LIST1) { fun (LIST2) { fun (LIST3) { ... } } }>.
 
 =head2 Advanced stuff
 
